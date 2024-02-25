@@ -13,6 +13,7 @@ import android.os.Build.VERSION.SDK_INT
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
+import android.security.keystore.StrongBoxUnavailableException
 import android.util.Base64
 import android.util.Log
 import androidx.annotation.RequiresApi
@@ -45,16 +46,38 @@ class ScreenLockCredentialStore(val context: Context) {
             .setUserAuthenticationRequired(true)
         if (SDK_INT >= 28) builder.setIsStrongBoxBacked(useStrongbox)
         if (SDK_INT >= 24) builder.setAttestationChallenge(challenge)
-        try {
-            generator.initialize(builder.build())
-            generator.generateKeyPair()
-        } catch (e: ProviderException) {
-            // If attestation does not work, the generateKeyPair method throws a ProviderException.
-            // Try to generate a key again without attestation, and let the exception propagate
-            // if it turns out that something else caused the error
-            if (SDK_INT >= 24) builder.setAttestationChallenge(null)
-            generator.initialize(builder.build())
-            generator.generateKeyPair()
+
+        var generatedKeypair = false
+        val exceptionClassesCaught = HashSet<Class<Exception>>()
+        while (!generatedKeypair) {
+            try {
+                generator.initialize(builder.build())
+                generator.generateKeyPair()
+                generatedKeypair = true
+            } catch (e: Exception) {
+                // Catch each exception class at most once.
+                // If we've caught the exception before, tried to correct it, and still catch the
+                // same exception, then we can't fix it and the exception should be thrown further
+                if (exceptionClassesCaught.contains(e.javaClass)) {
+                    throw e
+                }
+                exceptionClassesCaught.add(e.javaClass)
+
+                if (SDK_INT >= 28 && e is StrongBoxUnavailableException) {
+                    // Not all algorithms are backed by the Strongbox. If the Strongbox doesn't
+                    // support this keypair, fall back to TEE
+                    builder.setIsStrongBoxBacked(false)
+                } else if (SDK_INT >= 24 && e is ProviderException) {
+                    // This ProviderException is often thrown if the TEE or Strongbox doesn't have
+                    // a built-in key to attest the new key pair with. If this happens, remove the
+                    // attestation challenge and create an unattested key
+                    builder.setAttestationChallenge(null)
+                } else {
+                    // We don't know how to handle other errors, so they should be thrown up the
+                    // system
+                    throw e
+                }
+            }
         }
         return keyId
     }
