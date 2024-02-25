@@ -7,6 +7,7 @@ package org.microg.gms.fido.core.transport.screenlock
 
 import android.app.KeyguardManager
 import android.os.Build.VERSION.SDK_INT
+import android.util.Base64
 import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.biometric.BiometricPrompt
@@ -201,6 +202,27 @@ class ScreenLockTransportHandler(private val activity: FragmentActivity, callbac
                 // Not in store or unknown id
             }
         }
+
+        // If there is no allowlist, add all keys with the given rpId as possible keys
+        if (options.signOptions.allowList?.isEmpty() != false) {
+            val keys = store.getPublicKeys(options.rpId)
+            for ((alias, key) in keys) {
+                val aliasSplit = alias.split(Regex("\\."), 3)
+                if (aliasSplit.size != 3) continue
+                val type: Int = aliasSplit[0].toIntOrNull() ?: continue
+                if (type != 1) continue
+
+                val data: ByteArray
+                try {
+                     data = Base64.decode(aliasSplit[1], Base64.DEFAULT)
+                } catch (e: Exception) {
+                    continue
+                }
+
+                candidates.add(CredentialId(type.toByte(), data, options.rpId, key))
+            }
+        }
+
         if (candidates.isEmpty()) {
             // Show a biometric prompt even if no matching key to effectively rate-limit
             showBiometricPrompt(getApplicationName(activity, options, callerPackage), null)
@@ -212,6 +234,7 @@ class ScreenLockTransportHandler(private val activity: FragmentActivity, callbac
 
         val (clientData, clientDataHash) = getClientDataAndHash(activity, options, callerPackage)
 
+        // TODO: Allow the user to select a credential to supply
         val credentialId = candidates.first()
         val keyId = credentialId.data
         val authenticatorData = getAuthenticatorData(options.rpId, null)

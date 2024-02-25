@@ -6,6 +6,7 @@
 package org.microg.gms.fido.core.transport.screenlock
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.os.Build.VERSION.SDK_INT
@@ -32,6 +33,8 @@ class ScreenLockCredentialStore(val context: Context) {
 
     @RequiresApi(23)
     fun createKey(rpId: String, challenge: ByteArray): ByteArray {
+        var useStrongbox = false
+        if (SDK_INT >= 28) useStrongbox = context.packageManager.hasSystemFeature(PackageManager.FEATURE_STRONGBOX_KEYSTORE)
         val keyId = Random.nextBytes(32)
         val identifier = getAlias(rpId, keyId)
         Log.d(TAG, "Creating key for $identifier")
@@ -40,14 +43,37 @@ class ScreenLockCredentialStore(val context: Context) {
             .setDigests(KeyProperties.DIGEST_SHA256)
             .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
             .setUserAuthenticationRequired(true)
+        if (SDK_INT >= 28) builder.setIsStrongBoxBacked(useStrongbox)
         if (SDK_INT >= 24) builder.setAttestationChallenge(challenge)
-        generator.initialize(builder.build())
-        generator.generateKeyPair()
+        try {
+            generator.initialize(builder.build())
+            generator.generateKeyPair()
+        } catch (e: ProviderException) {
+            // If attestation does not work, the generateKeyPair method throws a ProviderException.
+            // Try to generate a key again without attestation, and let the exception propagate
+            // if it turns out that something else caused the error
+            if (SDK_INT >= 24) builder.setAttestationChallenge(null)
+            generator.initialize(builder.build())
+            generator.generateKeyPair()
+        }
         return keyId
     }
 
     fun getPublicKey(rpId: String, keyId: ByteArray): PublicKey? =
         keyStore.getCertificate(getAlias(rpId, keyId))?.publicKey
+
+    fun getPublicKeys(rpId: String): Collection<Pair<String, PublicKey>> {
+        val keys = ArrayList<Pair<String, PublicKey>>()
+        for (alias in keyStore.aliases()) {
+            if (alias.endsWith(".$rpId")) {
+                val key = keyStore.getCertificate(alias).publicKey
+                keys.add(Pair(alias, key))
+            }
+        }
+
+        return keys
+    }
+
 
     fun getCertificateChain(rpId: String, keyId: ByteArray): Array<Certificate> =
         keyStore.getCertificateChain(getAlias(rpId, keyId))
